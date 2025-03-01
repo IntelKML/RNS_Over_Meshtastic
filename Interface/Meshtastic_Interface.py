@@ -157,6 +157,7 @@ class MeshtasticInterface(Interface):
     # whenever a full packet has been received over
     # the underlying medium.
     def process_incoming(self, data):
+        RNS.log(f'Data Received: {len(data)}')
         # Update our received bytes counter
         self.rxb += len(data)
 
@@ -176,16 +177,22 @@ class MeshtasticInterface(Interface):
 
     def process_message(self, packet, interface):
         """Process meshtastic traffic incoming to system"""
-        RNS.log(f'From: {packet["from"]}, payload: {packet["decoded"]["portnum"], packet["decoded"]["payload"]}')
-        if packet["decoded"]["portnum"] == self.mt_bin_port:
-            packet_handler = PacketHandler(packet["decoded"]["payload"])
-            new_index, pos = packet_handler.get_metadata(packet_handler)
-            if packet["from"] in self.assembly_dict:
-                old_handler = self.assembly_dict[packet["from"]]
-                if new_index == old_handler.index:
+        # RNS.log(f'From: {packet["from"]}, payload: {packet["decoded"]["portnum"], packet["decoded"]["payload"]}')
+        if "decoded" in packet:
+            if packet["decoded"]["portnum"] == "PRIVATE_APP":
+                packet_handler = PacketHandler()
+                new_index, pos = packet_handler.get_metadata(packet["decoded"]["payload"])
+                old_handler = None
+                old_index = None
+                if packet["from"] in self.assembly_dict:
+                    old_handler = self.assembly_dict[packet["from"]]
+                    old_index = old_handler.index
+                if new_index is old_index and old_handler:
                     data = old_handler.process_packet(packet["decoded"]["payload"])
+                    RNS.log("Old Handler")
                 else:
                     data = packet_handler.process_packet(packet["decoded"]["payload"])
+                    RNS.log("New Handler")
                     self.assembly_dict[packet["from"]] = packet_handler
                 if data:
                     self.process_incoming(data)
@@ -305,14 +312,15 @@ class PacketHandler:
         if self.check_data():
             data = b''
             for key in sorted(self.data_dict.keys()):
-                data += self.data_dict[key][len(self.struct_format):]
+                data += self.data_dict[key][struct.calcsize(self.struct_format):]
             return data
         else:
             return None
 
     def get_metadata(self, packet):
         # Get and return metadata from packet
-        meta_data = packet[:len(self.struct_format)]
+        size = struct.calcsize(self.struct_format)
+        meta_data = packet[:size]
         new_index, pos = struct.unpack(self.struct_format, meta_data)
         return new_index, pos
 
