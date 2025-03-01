@@ -21,7 +21,7 @@ import time
 
 
 # Let's define our custom interface class. It must
-# be a sub-class of the RNS "Interface" class.
+# be a subclass of the RNS "Interface" class.
 class MeshtasticInterface(Interface):
     # All interface classes must define a default
     # IFAC size, used in IFAC setup when the user
@@ -56,6 +56,7 @@ class MeshtasticInterface(Interface):
             from meshtastic.ble_interface import BLEInterface
             from meshtastic.serial_interface import SerialInterface
             from pubsub import pub
+            self.mt_bin_port = meshtastic.portnums_pb2.PRIVATE_APP
         else:
             RNS.log("Using this interface requires a meshtastic module to be installed.", RNS.LOG_CRITICAL)
             RNS.log("You can install one with the command: python3 -m pip install meshtastic", RNS.LOG_CRITICAL)
@@ -108,8 +109,10 @@ class MeshtasticInterface(Interface):
         self.timeout = 100
         self.interface = None
         self.packet_queue = []
+        self.assembly_dict = {}
         self.packet_index = 0
         self.hop_limit = 1
+
 
         pub.subscribe(self.process_message, "meshtastic.receive")
         pub.subscribe(self.connection_complete, "meshtastic.connection.established")
@@ -169,12 +172,23 @@ class MeshtasticInterface(Interface):
         if self.online:
             # Then write the framed data to the port
             self.packet_queue.append(PacketHandler(data, self.packet_index))
-            self.packet_index += 1
-            self.packet_index = self.packet_index % 256
+            self.packet_index = (self.packet_index+1) % 256
 
     def process_message(self, packet, interface):
         """Process meshtastic traffic incoming to system"""
-        RNS.log(packet)
+        RNS.log(f'From: {packet["from"]}, payload: {packet["decoded"]["portnum"], packet["decoded"]["payload"]}')
+        if packet["decoded"]["portnum"] == self.mt_bin_port:
+            packet_handler = PacketHandler(packet["decoded"]["payload"])
+            new_index, pos = packet_handler.get_metadata(packet_handler)
+            if packet["from"] in self.assembly_dict:
+                old_handler = self.assembly_dict[packet["from"]]
+                if new_index == old_handler.index:
+                    data = old_handler.process_packet(packet["decoded"]["payload"])
+                else:
+                    data = packet_handler.process_packet(packet["decoded"]["payload"])
+                    self.assembly_dict[packet["from"]] = packet_handler
+                if data:
+                    self.process_incoming(data)
         pass
 
     def write_loop(self):
@@ -226,6 +240,7 @@ class MeshtasticInterface(Interface):
 
 class PacketHandler:
     struct_format = 'Bb'
+
     def __init__(self, data=None, index=None, max_payload=200):
         self.max_payload = max_payload
         self.index = index
@@ -244,9 +259,9 @@ class PacketHandler:
         for i in range(0, data_len, packet_size):
             data_list.append(data[i:i + packet_size])
         for i, packet in enumerate(data_list):
-            pos = i
-            if i == len(data_list)-1:
-                pos = -i
+            pos = i+1
+            if pos == len(data_list):
+                pos = -pos
             meta_data = struct.pack(self.struct_format, self.index, pos)
             self.data_dict[i] = meta_data+packet
 
@@ -269,8 +284,7 @@ class PacketHandler:
 
     def process_packet(self, packet: bytes):
         """Returns data if the packet is complete, and nothing if it isn't"""
-        meta_data = packet[:len(self.struct_format)]
-        new_index, pos = struct.unpack(self.struct_format, meta_data)
+        new_index, pos = self.get_metadata(packet)
         self.index = new_index
         self.data_dict[abs(pos)] = packet
         if pos < 0:
@@ -279,7 +293,7 @@ class PacketHandler:
 
     def check_data(self):
         """check content of data dict against the expected content"""
-        expected = 0
+        expected = 1
         for key in sorted(self.data_dict.keys()):
             if key != expected:
                 return False
@@ -295,6 +309,12 @@ class PacketHandler:
             return data
         else:
             return None
+
+    def get_metadata(self, packet):
+        # Get and return metadata from packet
+        meta_data = packet[:len(self.struct_format)]
+        new_index, pos = struct.unpack(self.struct_format, meta_data)
+        return new_index, pos
 
 
 # Finally, register the defined interface class as the
