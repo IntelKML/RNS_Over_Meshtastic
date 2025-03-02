@@ -111,8 +111,8 @@ class MeshtasticInterface(Interface):
         self.outgoing_packet_storage = {}
         self.packet_i_queue = []
         self.assembly_dict = {}
-        self.expected_index = []
-        self.requested_index = []
+        self.expected_index = {}
+        self.requested_index = {}
         self.packet_index = 0
         self.hop_limit = 1
 
@@ -160,7 +160,7 @@ class MeshtasticInterface(Interface):
     # whenever a full packet has been received over
     # the underlying medium.
     def process_incoming(self, data):
-        RNS.log(f'Data Received: {len(data)}')
+        # RNS.log(f'Data Received: {len(data)}')
         # Update our received bytes counter
         self.rxb += len(data)
 
@@ -185,42 +185,42 @@ class MeshtasticInterface(Interface):
         # RNS.log(f'From: {packet["from"]}, payload: {packet["decoded"]["portnum"], packet["decoded"]["payload"]}')
         if "decoded" in packet:
             if packet["decoded"]["portnum"] == "PRIVATE_APP":
+                if packet["from"] not in self.expected_index:
+                    self.expected_index[packet["from"]] = []
+                expected_index = self.expected_index[packet["from"]]
+                if packet["from"] not in self.requested_index:
+                    self.requested_index[packet["from"]] = []
+                requested_index = self.requested_index[packet["from"]]
+                if packet["from"] not in self.assembly_dict:
+                    self.assembly_dict[packet["from"]] = {}
                 payload = packet["decoded"]["payload"]
                 packet_handler = PacketHandler()
                 if payload[:3] == b'REQ':  # If it is a request
                     new_index, pos = packet_handler.get_metadata(payload[3:])
-                    RNS.log(f'REQ: {new_index}, {pos}')
                     self.packet_i_queue.insert(0, (new_index, pos))
                 else:  # Its data
                     new_index, pos = packet_handler.get_metadata(payload)
-                    RNS.log(f'{(new_index, pos)} not in {self.expected_index}')
                     expect_followup = True
-                    if self.requested_index:
-                        RNS.log(f'{self.requested_index}')
-                    if (new_index, abs(pos)) in self.expected_index:
-                        while (new_index, abs(pos)) in self.expected_index:
-                            self.expected_index.remove((new_index, abs(pos)))
-                        RNS.log(f'RETRANSMISSION Not Needed: {new_index} {pos}')
-                    elif (new_index, abs(pos)) in self.requested_index:
-                        self.requested_index.remove((new_index, abs(pos)))
-                        RNS.log(f'RETRANSMISSION received: {new_index} {pos}')
+                    if (new_index, abs(pos)) in expected_index:
+                        while (new_index, abs(pos)) in expected_index:
+                            expected_index.remove((new_index, abs(pos)))
+                    elif (new_index, abs(pos)) in requested_index:
+                        requested_index.remove((new_index, abs(pos)))
                         expect_followup = False
-                    elif len(self.expected_index):   # Packet was not expected but welcome add last expected index and carry on
-                        RNS.log(f'RETRANSMISSION Needed: {self.expected_index}')
-                        ex_index, ex_pos = self.expected_index.pop(0)
-                        self.requested_index.append((ex_index, abs(ex_pos)))
+                    elif len(expected_index):   # Packet was not expected but add last expected index and carry on
+                        ex_index, ex_pos = expected_index.pop(0)
+                        requested_index.append((ex_index, abs(ex_pos)))
+                        if len(requested_index) > 10:  # Keep length under 10 per client
+                            requested_index.pop(0)
                         self.packet_i_queue.insert(0, (-1, 0))
                         self.outgoing_packet_storage[-1] = [b'REQ' + struct.pack(packet_handler.struct_format,
                                                                                  ex_index, ex_pos)]
-                    if packet["from"] not in self.assembly_dict:
-                        self.assembly_dict[packet["from"]] = {}
-                    if new_index in self.assembly_dict[packet["from"]]:
+
+                    if new_index in self.assembly_dict[packet["from"]]:  # Old packet handler
                         old_handler = self.assembly_dict[packet["from"]][new_index]
                         data = old_handler.process_packet(payload)
-                        RNS.log("Old Handler")
-                    else:
+                    else:  # Make a new one
                         data = packet_handler.process_packet(payload)
-                        RNS.log("New Handler")
                         self.assembly_dict[packet["from"]][new_index] = packet_handler
                     if data:
                         self.process_incoming(data)
@@ -229,7 +229,7 @@ class MeshtasticInterface(Interface):
                     else:  # Move on to higher pos
                         expected = (new_index, (pos + 1))
                     if expect_followup:
-                        self.expected_index.insert(0, expected)
+                        expected_index.insert(0, expected)
 
         pass
 
@@ -243,7 +243,6 @@ class MeshtasticInterface(Interface):
                 index, position = self.packet_i_queue.pop(0)
                 if index in self.outgoing_packet_storage:
                     data = self.outgoing_packet_storage[index][position]  # Get data from position
-                    RNS.log(f'Handling packet {index}, {position} -> {data}')
             if data:
                 # Update the transmitted bytes counter
                 # and ensure that all data was written
