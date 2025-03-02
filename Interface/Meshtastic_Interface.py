@@ -169,8 +169,7 @@ class MeshtasticInterface(Interface):
     # call this method on the interface whenever the
     # interface must transmit a packet.
     def process_outgoing(self, data:bytes):
-        RNS.log("Outgoing")
-        if self.online:
+        if len(self.packet_queue) < 256:
             # Then write the framed data to the port
             self.packet_queue.append(PacketHandler(data, self.packet_index))
             self.packet_index = (self.packet_index+1) % 256
@@ -189,10 +188,10 @@ class MeshtasticInterface(Interface):
                     old_index = old_handler.index
                 if new_index is old_index and old_handler:
                     data = old_handler.process_packet(packet["decoded"]["payload"])
-                    RNS.log("Old Handler")
+                    # RNS.log("Old Handler")
                 else:
                     data = packet_handler.process_packet(packet["decoded"]["payload"])
-                    RNS.log("New Handler")
+                    # RNS.log("New Handler")
                     self.assembly_dict[packet["from"]] = packet_handler
                 if data:
                     self.process_incoming(data)
@@ -207,13 +206,13 @@ class MeshtasticInterface(Interface):
             while not data and self.packet_queue:
                 current_packet = self.packet_queue[0]
                 data = current_packet.get_next()
-                if not data:
+                if current_packet.is_done():
                     self.packet_queue.pop(0)
             if data:
                 # Update the transmitted bytes counter
                 # and ensure that all data was written
                 self.txb += len(data) - 2  # -2 for overhead
-                RNS.log(f'Sending: {data}')
+                # RNS.log(f'Sending: {data}')
                 self.interface.sendData(data,
                                    portNum=meshtastic.portnums_pb2.PRIVATE_APP,
                                    wantAck=False,
@@ -281,13 +280,14 @@ class PacketHandler:
             self.done = True
         return ret
 
+    def is_done(self):
+        """Return True if the get_next loop is completed"""
+        return self.done
+
     def get_index(self, i):
         """Get the packet at an index"""
         if i in self.data_dict:
             return self.data_dict[i]
-
-    def is_done(self):
-        return self.done
 
     def process_packet(self, packet: bytes):
         """Returns data if the packet is complete, and nothing if it isn't"""
