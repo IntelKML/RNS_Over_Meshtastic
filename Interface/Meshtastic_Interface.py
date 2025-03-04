@@ -28,7 +28,15 @@ class MeshtasticInterface(Interface):
     # has not specified a custom IFAC size. This
     # option is specified in bytes.
     DEFAULT_IFAC_SIZE = 8
-    speed_to_bitrate = {7: 500*2}
+    speed_to_delay = {8: .4,  # Short-range Turbo (recommended)
+                      6: 1,  # Short Fast (best if short turbo is unavailable)
+                      5: 3,  # Short-range Slow (best if short turbo is unavailable)
+                      7: 12,  # Long Range - moderate Fast
+                      4: 4,  # Medium Range - Fast  (Slowest recommended speed)
+                      3:6,  # Medium Range - Slow
+                      1: 15,  # Long Range - Slow
+                      0: 8  # Long Range - Fast
+                      }
 
     # The following properties are local to this
     # particular interface implementation.
@@ -82,7 +90,7 @@ class MeshtasticInterface(Interface):
         # case any are missing.
         port = ifconf["port"] if "port" in ifconf else None
         ble_port = ifconf["ble_port"] if "ble_port" in ifconf else None
-        speed = int(ifconf["data_speed"]) if "data_speed" in ifconf else 6
+        speed = int(ifconf["data_speed"]) if "data_speed" in ifconf else 8
 
         # All interfaces must supply a hardware MTU value
         # to the RNS Transport instance. This value should
@@ -98,7 +106,7 @@ class MeshtasticInterface(Interface):
 
         # In this case, we can also set the indicated bit-
         # rate of the interface to the serial port speed.
-        self.bitrate = self.speed_to_bitrate[speed]
+        self.bitrate = ifconf["bitrate"] if "bitrate" in ifconf else 500
 
         # Configure internal properties on the interface
         # according to the supplied configuration.
@@ -126,7 +134,7 @@ class MeshtasticInterface(Interface):
         try:
             self.open_interface()
         except Exception as e:
-            RNS.log("Could not open meshtastic interface " + str(self), RNS.LOG_ERROR)
+            RNS.log("Meshtastic: Could not open meshtastic interface " + str(self), RNS.LOG_ERROR)
             raise e
 
         # If opening the port succeeded, run any post-open
@@ -136,11 +144,11 @@ class MeshtasticInterface(Interface):
     # parameters and store a reference to the open port.
     def open_interface(self):
         if self.port:
-            RNS.log("Opening serial port " + self.port + "...", RNS.LOG_VERBOSE)
+            RNS.log("Meshtastic: Opening serial port " + self.port + "...", RNS.LOG_VERBOSE)
             from meshtastic.serial_interface import SerialInterface
             self.interface = SerialInterface(devPath=self.port)
         elif self.ble_port:
-            RNS.log("Opening ble device " + self.ble_port + "...", RNS.LOG_VERBOSE)
+            RNS.log("Meshtastic: Opening ble device " + self.ble_port + "...", RNS.LOG_VERBOSE)
             from meshtastic.ble_interface import BLEInterface
             self.interface = BLEInterface(address=self.ble_port)
         else:
@@ -150,11 +158,18 @@ class MeshtasticInterface(Interface):
     # is to wait a small amount of time for the
     # hardware to initialise and then start a thread
     # that reads any incoming data from the device.
-    def configure_device(self):
-        thread = threading.Thread(target=self.write_loop)
-        thread.daemon = True
-        thread.start()
-        self.online = True
+    def configure_device(self, interface):
+        # Set the speed to the radio
+        ourNode = interface.getNode('^local')
+        if ourNode.localConfig.lora.modem_preset != self.speed:
+            ourNode.localConfig.lora.modem_preset = self.speed
+            ourNode.writeConfig("lora")
+            self.online = False
+        else:
+            thread = threading.Thread(target=self.write_loop)
+            thread.daemon = True
+            thread.start()
+            self.online = True
 
     # This method will be called from our read-loop
     # whenever a full packet has been received over
@@ -224,6 +239,7 @@ class MeshtasticInterface(Interface):
                         self.assembly_dict[packet["from"]][new_index] = packet_handler
                     if data:
                         self.process_incoming(data)
+                        self.assembly_dict[packet["from"]].pop(new_index)
                     if pos < 0:  # Move to next index
                         expected = (calc_index(new_index), 1)
                     else:  # Move on to higher pos
@@ -235,7 +251,8 @@ class MeshtasticInterface(Interface):
 
     def write_loop(self):
         """Writes packets from queue to meshtastic device"""
-        RNS.log('outgoing loop started')
+        RNS.log('Meshtastic: outgoing loop started')
+        sleep_time = self.speed_to_delay[self.speed] if self.speed in self.speed_to_delay else 7
         import meshtastic
         while True:
             data = None
@@ -254,18 +271,20 @@ class MeshtasticInterface(Interface):
                                    wantResponse=False,
                                    channelIndex=0,
                                    hopLimit=self.hop_limit)
-            time.sleep(.4)  # Make sending rate dynamic
+            time.sleep(sleep_time)  # Make sending rate dynamic
 
     def connection_complete(self, interface):
         """Process meshtastic connection opened"""
-        RNS.log("Connected")
-        self.configure_device()
+        RNS.log("Meshtastic: Connected")
+        self.configure_device(interface)
         self.interface = interface
 
     def connection_closed(self, interface):
         """Process meshtastic traffic incoming to system"""
-        RNS.log("Disconnected")
+        RNS.log("Meshtastic: Disconnected")
         self.online = False
+        time.sleep(10)  # Wait before restarting
+        self.open_interface()
 
     # Signal to Reticulum that this interface should
     # not perform any ingress limiting.
