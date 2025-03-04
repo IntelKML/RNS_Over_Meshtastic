@@ -15,7 +15,7 @@ Interface for RNS using Meshtastic as the underlying networking layer to utilize
   data_speed = 8  # Radio speed setting desired for the network(do not use long-fast)
 ```
 
-- Radio settings and their associated transfer speeds are shown below (from [Meshtastic_Interface.py](Interface%2FMeshtastic_Interface.py))
+- Radio settings and their associated transfer speeds are shown below; time unit is seconds between packets (from [Meshtastic_Interface.py](Interface%2FMeshtastic_Interface.py))
 ```python
 speed_to_delay = {8: .4,  # Short-range Turbo (recommended)
                   6: 1,  # Short Fast (best if short turbo is unavailable)
