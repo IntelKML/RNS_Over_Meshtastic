@@ -28,7 +28,15 @@ class MeshtasticInterface(Interface):
     # has not specified a custom IFAC size. This
     # option is specified in bytes.
     DEFAULT_IFAC_SIZE = 8
-    speed_to_bitrate = {7: 500*2}
+    speed_to_delay = {8: .4,  # Short-range Turbo (recommended)
+                      6: 1,  # Short Fast (best if short turbo is unavailable)
+                      5: 3,  # Short-range Slow (best if short turbo is unavailable)
+                      7: 12,  # Long Range - moderate Fast
+                      4: 4,  # Medium Range - Fast  (Slowest recommended speed)
+                      3:6,  # Medium Range - Slow
+                      1: 15,  # Long Range - Slow
+                      0: 8  # Long Range - Fast
+                      }
 
     # The following properties are local to this
     # particular interface implementation.
@@ -82,7 +90,7 @@ class MeshtasticInterface(Interface):
         # case any are missing.
         port = ifconf["port"] if "port" in ifconf else None
         ble_port = ifconf["ble_port"] if "ble_port" in ifconf else None
-        speed = int(ifconf["data_speed"]) if "data_speed" in ifconf else 6
+        speed = int(ifconf["data_speed"]) if "data_speed" in ifconf else 8
 
         # All interfaces must supply a hardware MTU value
         # to the RNS Transport instance. This value should
@@ -98,7 +106,7 @@ class MeshtasticInterface(Interface):
 
         # In this case, we can also set the indicated bit-
         # rate of the interface to the serial port speed.
-        self.bitrate = self.speed_to_bitrate[speed]
+        self.bitrate = ifconf["bitrate"] if "bitrate" in ifconf else 500
 
         # Configure internal properties on the interface
         # according to the supplied configuration.
@@ -108,8 +116,11 @@ class MeshtasticInterface(Interface):
         self.speed = speed
         self.timeout = 100
         self.interface = None
-        self.packet_queue = []
+        self.outgoing_packet_storage = {}
+        self.packet_i_queue = []
         self.assembly_dict = {}
+        self.expected_index = {}
+        self.requested_index = {}
         self.packet_index = 0
         self.hop_limit = 1
 
@@ -123,7 +134,7 @@ class MeshtasticInterface(Interface):
         try:
             self.open_interface()
         except Exception as e:
-            RNS.log("Could not open meshtastic interface " + str(self), RNS.LOG_ERROR)
+            RNS.log("Meshtastic: Could not open meshtastic interface " + str(self), RNS.LOG_ERROR)
             raise e
 
         # If opening the port succeeded, run any post-open
@@ -133,11 +144,11 @@ class MeshtasticInterface(Interface):
     # parameters and store a reference to the open port.
     def open_interface(self):
         if self.port:
-            RNS.log("Opening serial port " + self.port + "...", RNS.LOG_VERBOSE)
+            RNS.log("Meshtastic: Opening serial port " + self.port + "...", RNS.LOG_VERBOSE)
             from meshtastic.serial_interface import SerialInterface
             self.interface = SerialInterface(devPath=self.port)
         elif self.ble_port:
-            RNS.log("Opening ble device " + self.ble_port + "...", RNS.LOG_VERBOSE)
+            RNS.log("Meshtastic: Opening ble device " + self.ble_port + "...", RNS.LOG_VERBOSE)
             from meshtastic.ble_interface import BLEInterface
             self.interface = BLEInterface(address=self.ble_port)
         else:
@@ -147,17 +158,24 @@ class MeshtasticInterface(Interface):
     # is to wait a small amount of time for the
     # hardware to initialise and then start a thread
     # that reads any incoming data from the device.
-    def configure_device(self):
-        thread = threading.Thread(target=self.write_loop)
-        thread.daemon = True
-        thread.start()
-        self.online = True
+    def configure_device(self, interface):
+        # Set the speed to the radio
+        ourNode = interface.getNode('^local')
+        if ourNode.localConfig.lora.modem_preset != self.speed:
+            ourNode.localConfig.lora.modem_preset = self.speed
+            ourNode.writeConfig("lora")
+            self.online = False
+        else:
+            thread = threading.Thread(target=self.write_loop)
+            thread.daemon = True
+            thread.start()
+            self.online = True
 
     # This method will be called from our read-loop
     # whenever a full packet has been received over
     # the underlying medium.
     def process_incoming(self, data):
-        RNS.log(f'Data Received: {len(data)}')
+        # RNS.log(f'Data Received: {len(data)}')
         # Update our received bytes counter
         self.rxb += len(data)
 
@@ -169,45 +187,79 @@ class MeshtasticInterface(Interface):
     # call this method on the interface whenever the
     # interface must transmit a packet.
     def process_outgoing(self, data:bytes):
-        if len(self.packet_queue) < 256:
+        if len(self.packet_i_queue) < 256:
             # Then write the framed data to the port
-            self.packet_queue.append(PacketHandler(data, self.packet_index))
-            self.packet_index = (self.packet_index+1) % 256
+            handler = PacketHandler(data, self.packet_index)
+            for key in handler.get_keys():
+                self.packet_i_queue.append((handler.index, key))
+            self.outgoing_packet_storage[handler.index] = handler
+            self.packet_index = calc_index(self.packet_index)
 
     def process_message(self, packet, interface):
         """Process meshtastic traffic incoming to system"""
         # RNS.log(f'From: {packet["from"]}, payload: {packet["decoded"]["portnum"], packet["decoded"]["payload"]}')
         if "decoded" in packet:
             if packet["decoded"]["portnum"] == "PRIVATE_APP":
+                if packet["from"] not in self.expected_index:
+                    self.expected_index[packet["from"]] = []
+                expected_index = self.expected_index[packet["from"]]
+                if packet["from"] not in self.requested_index:
+                    self.requested_index[packet["from"]] = []
+                requested_index = self.requested_index[packet["from"]]
+                if packet["from"] not in self.assembly_dict:
+                    self.assembly_dict[packet["from"]] = {}
+                payload = packet["decoded"]["payload"]
                 packet_handler = PacketHandler()
-                new_index, pos = packet_handler.get_metadata(packet["decoded"]["payload"])
-                old_handler = None
-                old_index = None
-                if packet["from"] in self.assembly_dict:
-                    old_handler = self.assembly_dict[packet["from"]]
-                    old_index = old_handler.index
-                if new_index is old_index and old_handler:
-                    data = old_handler.process_packet(packet["decoded"]["payload"])
-                    # RNS.log("Old Handler")
-                else:
-                    data = packet_handler.process_packet(packet["decoded"]["payload"])
-                    # RNS.log("New Handler")
-                    self.assembly_dict[packet["from"]] = packet_handler
-                if data:
-                    self.process_incoming(data)
+                if payload[:3] == b'REQ':  # If it is a request
+                    new_index, pos = packet_handler.get_metadata(payload[3:])
+                    self.packet_i_queue.insert(0, (new_index, pos))
+                else:  # Its data
+                    new_index, pos = packet_handler.get_metadata(payload)
+                    expect_followup = True
+                    if (new_index, abs(pos)) in expected_index:
+                        while (new_index, abs(pos)) in expected_index:
+                            expected_index.remove((new_index, abs(pos)))
+                    elif (new_index, abs(pos)) in requested_index:
+                        requested_index.remove((new_index, abs(pos)))
+                        expect_followup = False
+                    elif len(expected_index):   # Packet was not expected but add last expected index and carry on
+                        ex_index, ex_pos = expected_index.pop(0)
+                        requested_index.append((ex_index, abs(ex_pos)))
+                        if len(requested_index) > 10:  # Keep length under 10 per client
+                            requested_index.pop(0)
+                        self.packet_i_queue.insert(0, (-1, 0))
+                        self.outgoing_packet_storage[-1] = [b'REQ' + struct.pack(packet_handler.struct_format,
+                                                                                 ex_index, ex_pos)]
+
+                    if new_index in self.assembly_dict[packet["from"]]:  # Old packet handler
+                        old_handler = self.assembly_dict[packet["from"]][new_index]
+                        data = old_handler.process_packet(payload)
+                    else:  # Make a new one
+                        data = packet_handler.process_packet(payload)
+                        self.assembly_dict[packet["from"]][new_index] = packet_handler
+                    if data:
+                        self.process_incoming(data)
+                        self.assembly_dict[packet["from"]].pop(new_index)
+                    if pos < 0:  # Move to next index
+                        expected = (calc_index(new_index), 1)
+                    else:  # Move on to higher pos
+                        expected = (new_index, (pos + 1))
+                    if expect_followup:
+                        expected_index.insert(0, expected)
+
         pass
 
     def write_loop(self):
         """Writes packets from queue to meshtastic device"""
-        RNS.log('outgoing loop started')
+        RNS.log('Meshtastic: outgoing loop started')
+        sleep_time = self.speed_to_delay[self.speed] if self.speed in self.speed_to_delay else 7
         import meshtastic
         while True:
             data = None
-            while not data and self.packet_queue:
-                current_packet = self.packet_queue[0]
-                data = current_packet.get_next()
-                if current_packet.is_done():
-                    self.packet_queue.pop(0)
+            while not data and self.packet_i_queue:
+                index, position = self.packet_i_queue.pop(0)
+                if index in self.outgoing_packet_storage:
+                    data = self.outgoing_packet_storage[index][position]  # Get data from position
             if data:
                 # Update the transmitted bytes counter
                 # and ensure that all data was written
@@ -219,18 +271,20 @@ class MeshtasticInterface(Interface):
                                    wantResponse=False,
                                    channelIndex=0,
                                    hopLimit=self.hop_limit)
-            time.sleep(.4)  # Make sending rate dynamic
+            time.sleep(sleep_time)  # Make sending rate dynamic
 
     def connection_complete(self, interface):
         """Process meshtastic connection opened"""
-        RNS.log("Connected")
-        self.configure_device()
+        RNS.log("Meshtastic: Connected")
+        self.configure_device(interface)
         self.interface = interface
 
     def connection_closed(self, interface):
         """Process meshtastic traffic incoming to system"""
-        RNS.log("Disconnected")
+        RNS.log("Meshtastic: Disconnected")
         self.online = False
+        time.sleep(10)  # Wait before restarting
+        self.open_interface()
 
     # Signal to Reticulum that this interface should
     # not perform any ingress limiting.
@@ -251,7 +305,7 @@ class PacketHandler:
         self.max_payload = max_payload
         self.index = index
         self.data_dict = {}
-        self.loop_pos = 0
+        self.loop_pos = 1
         self.done = False
         if data:  # Means we are sending
             self.split_data(data)
@@ -269,25 +323,27 @@ class PacketHandler:
             if pos == len(data_list):
                 pos = -pos
             meta_data = struct.pack(self.struct_format, self.index, pos)
-            self.data_dict[i] = meta_data+packet
+            self.data_dict[pos] = meta_data+packet
 
     def get_next(self):
         """get next packet to send"""
-        ret = self.get_index(self.loop_pos)
-        self.loop_pos += 1
+        ret = self[self.loop_pos]
         if max(self.data_dict.keys()) < self.loop_pos:
-            self.loop_pos = 0
+            self.loop_pos = 1
             self.done = True
+        self.loop_pos += 1
         return ret
 
     def is_done(self):
         """Return True if the get_next loop is completed"""
         return self.done
 
-    def get_index(self, i):
+    def __getitem__(self, i):
         """Get the packet at an index"""
         if i in self.data_dict:
             return self.data_dict[i]
+        elif -i in self.data_dict:
+            return self.data_dict[-i]
 
     def process_packet(self, packet: bytes):
         """Returns data if the packet is complete, and nothing if it isn't"""
@@ -307,6 +363,9 @@ class PacketHandler:
             expected += 1
         return True
 
+    def get_keys(self):
+        return self.data_dict.keys()
+
     def assemble_data(self):
         """Put all the data together and return it or nothing if it fails"""
         if self.check_data():
@@ -324,6 +383,9 @@ class PacketHandler:
         new_index, pos = struct.unpack(self.struct_format, meta_data)
         return new_index, pos
 
+
+def calc_index(curr_index):
+    return (curr_index + 1) % 256
 
 # Finally, register the defined interface class as the
 # target class for Reticulum to use as an interface
