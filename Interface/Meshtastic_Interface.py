@@ -13,11 +13,12 @@
 # port = / dev / ttyUSB0
 # speed = 115200
 
-import os
-import sys
 import struct
 import threading
 import time
+import re
+
+import meshtastic
 
 
 # Let's define our custom interface class. It must
@@ -33,7 +34,7 @@ class MeshtasticInterface(Interface):
                       5: 3,  # Short-range Slow (best if short turbo is unavailable)
                       7: 12,  # Long Range - moderate Fast
                       4: 4,  # Medium Range - Fast  (Slowest recommended speed)
-                      3:6,  # Medium Range - Slow
+                      3: 6,  # Medium Range - Slow
                       1: 15,  # Long Range - Slow
                       0: 8  # Long Range - Fast
                       }
@@ -121,9 +122,9 @@ class MeshtasticInterface(Interface):
         self.assembly_dict = {}
         self.expected_index = {}
         self.requested_index = {}
+        self.dest_to_node_dict = {}
         self.packet_index = 0
         self.hop_limit = 1
-
 
         pub.subscribe(self.process_message, "meshtastic.receive")
         pub.subscribe(self.connection_complete, "meshtastic.connection.established")
@@ -171,6 +172,16 @@ class MeshtasticInterface(Interface):
             thread.start()
             self.online = True
 
+    def check_dest_incoming(self, data, from_addr):
+        bit_str = "{:08b}".format(int(data[0]))
+        if re.match(r'00..11..', bit_str):  # Looking for 0(check public) 0(check Single dest) 0(any context) 0(any prop type) 11(check link dest type) 00(any packet type)
+            dest = data[2:18]
+            # RNS.log(f'Routing {RNS.prettyhexrep(dest)} -> {from_addr}')
+            if len(self.dest_to_node_dict.keys()) > 20:  # Limit size to 20 pairs
+                self.dest_to_node_dict.pop(tuple(self.dest_to_node_dict.keys())[-1])
+            self.dest_to_node_dict[dest] = from_addr
+        self.process_incoming(data)
+
     # This method will be called from our read-loop
     # whenever a full packet has been received over
     # the underlying medium.
@@ -186,10 +197,13 @@ class MeshtasticInterface(Interface):
     # The running Reticulum Transport instance will
     # call this method on the interface whenever the
     # interface must transmit a packet.
-    def process_outgoing(self, data:bytes):
+    def process_outgoing(self, data: bytes):
         if len(self.packet_i_queue) < 256:
             # Then write the framed data to the port
-            handler = PacketHandler(data, self.packet_index)
+            dest = meshtastic.BROADCAST_ADDR
+            if data[2:18] in self.dest_to_node_dict:  # lookup to see if destination is found
+                dest = self.dest_to_node_dict[data[2:18]]
+            handler = PacketHandler(data, self.packet_index, custom_destination_id=dest)
             for key in handler.get_keys():
                 self.packet_i_queue.append((handler.index, key))
             self.outgoing_packet_storage[handler.index] = handler
@@ -222,7 +236,7 @@ class MeshtasticInterface(Interface):
                     elif (new_index, abs(pos)) in requested_index:
                         requested_index.remove((new_index, abs(pos)))
                         expect_followup = False
-                    elif len(expected_index):   # Packet was not expected but add last expected index and carry on
+                    elif len(expected_index):  # Packet was not expected but add last expected index and carry on
                         ex_index, ex_pos = expected_index.pop(0)
                         requested_index.append((ex_index, abs(ex_pos)))
                         if len(requested_index) > 10:  # Keep length under 10 per client
@@ -238,7 +252,7 @@ class MeshtasticInterface(Interface):
                         data = packet_handler.process_packet(payload)
                         self.assembly_dict[packet["from"]][new_index] = packet_handler
                     if data:
-                        self.process_incoming(data)
+                        self.check_dest_incoming(data, packet["from"])
                         self.assembly_dict[packet["from"]].pop(new_index)
                     if pos < 0:  # Move to next index
                         expected = (calc_index(new_index), 1)
@@ -256,21 +270,24 @@ class MeshtasticInterface(Interface):
         import meshtastic
         while True:
             data = None
+            dest = None
             while not data and self.packet_i_queue:
                 index, position = self.packet_i_queue.pop(0)
                 if index in self.outgoing_packet_storage:
                     data = self.outgoing_packet_storage[index][position]  # Get data from position
+                    dest = self.outgoing_packet_storage[index].destination_id
             if data:
                 # Update the transmitted bytes counter
                 # and ensure that all data was written
                 self.txb += len(data) - 2  # -2 for overhead
-                # RNS.log(f'Sending: {data}')
+                # RNS.log(f'Sending on dest: {dest}')
                 self.interface.sendData(data,
-                                   portNum=meshtastic.portnums_pb2.PRIVATE_APP,
-                                   wantAck=False,
-                                   wantResponse=False,
-                                   channelIndex=0,
-                                   hopLimit=self.hop_limit)
+                                        portNum=meshtastic.portnums_pb2.PRIVATE_APP,
+                                        destinationId=dest,
+                                        wantAck=False,
+                                        wantResponse=False,
+                                        channelIndex=0,
+                                        hopLimit=self.hop_limit)
             time.sleep(sleep_time)  # Make sending rate dynamic
 
     def connection_complete(self, interface):
@@ -298,15 +315,17 @@ class MeshtasticInterface(Interface):
     def __str__(self):
         return "MeshtasticInterface[" + self.name + "]"
 
+
 class PacketHandler:
     struct_format = 'Bb'
 
-    def __init__(self, data=None, index=None, max_payload=200):
+    def __init__(self, data=None, index=None, max_payload=200, custom_destination_id=meshtastic.BROADCAST_ADDR):
         self.max_payload = max_payload
         self.index = index
         self.data_dict = {}
         self.loop_pos = 1
         self.done = False
+        self.destination_id = custom_destination_id
         if data:  # Means we are sending
             self.split_data(data)
 
@@ -314,16 +333,16 @@ class PacketHandler:
         """Split data into even chunks and add metadata to it"""
         data_list = []
         data_len = len(data)
-        num_packets = data_len//self.max_payload + 1  # Number of packets needed to hold the data
-        packet_size = data_len//num_packets + 1
+        num_packets = data_len // self.max_payload + 1  # Number of packets needed to hold the data
+        packet_size = data_len // num_packets + 1
         for i in range(0, data_len, packet_size):
             data_list.append(data[i:i + packet_size])
         for i, packet in enumerate(data_list):
-            pos = i+1
+            pos = i + 1
             if pos == len(data_list):
                 pos = -pos
             meta_data = struct.pack(self.struct_format, self.index, pos)
-            self.data_dict[pos] = meta_data+packet
+            self.data_dict[pos] = meta_data + packet
 
     def get_next(self):
         """get next packet to send"""
@@ -386,6 +405,7 @@ class PacketHandler:
 
 def calc_index(curr_index):
     return (curr_index + 1) % 256
+
 
 # Finally, register the defined interface class as the
 # target class for Reticulum to use as an interface
