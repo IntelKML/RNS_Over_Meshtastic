@@ -18,8 +18,6 @@ import threading
 import time
 import re
 
-import meshtastic
-
 
 # Let's define our custom interface class. It must
 # be a subclass of the RNS "Interface" class.
@@ -200,7 +198,8 @@ class MeshtasticInterface(Interface):
     def process_outgoing(self, data: bytes):
         if len(self.packet_i_queue) < 256:
             # Then write the framed data to the port
-            dest = meshtastic.BROADCAST_ADDR
+            from meshtastic import BROADCAST_ADDR
+            dest = BROADCAST_ADDR
             if data[2:18] in self.dest_to_node_dict:  # lookup to see if destination is found
                 dest = self.dest_to_node_dict[data[2:18]]
             handler = PacketHandler(data, self.packet_index, custom_destination_id=dest)
@@ -270,12 +269,13 @@ class MeshtasticInterface(Interface):
         import meshtastic
         while True:
             data = None
-            dest = None
+            dest = meshtastic.BROADCAST_ADDR
             while not data and self.packet_i_queue:
                 index, position = self.packet_i_queue.pop(0)
                 if index in self.outgoing_packet_storage:
                     data = self.outgoing_packet_storage[index][position]  # Get data from position
-                    dest = self.outgoing_packet_storage[index].destination_id
+                    if self.outgoing_packet_storage[index] is PacketHandler:
+                        dest = self.outgoing_packet_storage[index].destination_id
             if data:
                 # Update the transmitted bytes counter
                 # and ensure that all data was written
@@ -319,7 +319,7 @@ class MeshtasticInterface(Interface):
 class PacketHandler:
     struct_format = 'Bb'
 
-    def __init__(self, data=None, index=None, max_payload=200, custom_destination_id=meshtastic.BROADCAST_ADDR):
+    def __init__(self, data=None, index=None, max_payload=200, custom_destination_id=None):
         self.max_payload = max_payload
         self.index = index
         self.data_dict = {}
