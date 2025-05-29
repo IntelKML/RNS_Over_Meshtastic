@@ -33,7 +33,7 @@ class MeshtasticInterface(Interface):
                       5: 3,  # Short-range Slow (best if short turbo is unavailable)
                       7: 12,  # Long Range - moderate Fast
                       4: 4,  # Medium Range - Fast  (Slowest recommended speed)
-                      3:6,  # Medium Range - Slow
+                      3: 6,  # Medium Range - Slow
                       1: 15,  # Long Range - Slow
                       0: 8  # Long Range - Fast
                       }
@@ -64,7 +64,7 @@ class MeshtasticInterface(Interface):
             from meshtastic.ble_interface import BLEInterface
             from meshtastic.serial_interface import SerialInterface
             from pubsub import pub
-            self.mt_bin_port = meshtastic.portnums_pb2.PRIVATE_APP
+            self.mt_bin_port = meshtastic.portnums_pb2.RETICULUM_TUNNEL_APP
         else:
             RNS.log("Using this interface requires a meshtastic module to be installed.", RNS.LOG_CRITICAL)
             RNS.log("You can install one with the command: python3 -m pip install meshtastic", RNS.LOG_CRITICAL)
@@ -266,7 +266,7 @@ class MeshtasticInterface(Interface):
                 self.txb += len(data) - 2  # -2 for overhead
                 # RNS.log(f'Sending: {data}')
                 self.interface.sendData(data,
-                                   portNum=meshtastic.portnums_pb2.PRIVATE_APP,
+                                   portNum=self.mt_bin_port,
                                    wantAck=False,
                                    wantResponse=False,
                                    channelIndex=0,
