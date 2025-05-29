@@ -63,7 +63,7 @@ class MeshtasticInterface(Interface):
             from meshtastic.ble_interface import BLEInterface
             from meshtastic.serial_interface import SerialInterface
             from pubsub import pub
-            self.mt_bin_port = meshtastic.portnums_pb2.PRIVATE_APP
+            self.mt_bin_port = meshtastic.portnums_pb2.RETICULUM_TUNNEL_APP
         else:
             RNS.log("Using this interface requires a meshtastic module to be installed.", RNS.LOG_CRITICAL)
             RNS.log("You can install one with the command: python3 -m pip install meshtastic", RNS.LOG_CRITICAL)
@@ -160,7 +160,7 @@ class MeshtasticInterface(Interface):
             port = DEFAULT_TCP_PORT
             if ":" in self.tcp_port:
                 host, port = self.tcp_port.split(":", maxsplit=1)
-            
+
             self.interface = TCPInterface(hostname=host, portNumber=port)
         else:
             raise ValueError(f"No port or ble_port specified for {self}")
@@ -294,7 +294,7 @@ class MeshtasticInterface(Interface):
                 self.txb += len(data) - 2  # -2 for overhead
                 # RNS.log(f'Sending on dest: {dest}')
                 self.interface.sendData(data,
-                                        portNum=meshtastic.portnums_pb2.PRIVATE_APP,
+                                        portNum=self.mt_bin_port,
                                         destinationId=dest,
                                         wantAck=False,
                                         wantResponse=False,
