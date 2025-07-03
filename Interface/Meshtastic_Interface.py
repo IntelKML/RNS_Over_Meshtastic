@@ -224,7 +224,7 @@ class MeshtasticInterface(Interface):
         """Process meshtastic traffic incoming to system"""
         # RNS.log(f'From: {packet["from"]}, payload: {packet["decoded"]["portnum"], packet["decoded"]["payload"]}')
         if "decoded" in packet:
-            if packet["decoded"]["portnum"] == "PRIVATE_APP":
+            if packet["decoded"]["portnum"] == "RETICULUM_TUNNEL_APP":
                 if packet["from"] not in self.expected_index:
                     self.expected_index[packet["from"]] = []
                 expected_index = self.expected_index[packet["from"]]
