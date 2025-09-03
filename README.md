@@ -1,36 +1,55 @@
-# RNS_Over_Meshtastic
-Interface for RNS using Meshtastic as the underlying networking layer to utilize existing meshtastic hardware.
+A tiny Kotlin ForegroundService that binds the Meshtastic Android app via IMeshService (AIDL) and exposes a localhost TCP socket for Reticulum/Sideband. It lets you run RNS-over-Meshtastic on Android without touching BLE/USB or recompiling Sideband.
 
-- This is a direct followup project to https://github.com/landandair/Meshtastic_File_Transfer and fixes many of its issues (use the rncp utility of RNS and get a more reliable easy to use utility)
-- Consider the expected max speed to be around 500 bytes/s so notably worse than RNode
-- has the benefit of being propagated and functional alongside existing standalone Meshtastic Nodes
-- Ideal use case would be as a faster secondary meshtastic network covering an area providing a route for more intensive data uses such as RNS
+TL;DR: Meshtastic app owns the radio. This service rides on top of it and gives Reticulum a simple socket: 127.0.0.1:45832 → PRIVATE_APP/Stream.
 
-## Usage
-- Install Meshtastic Python Library
-- Add the file [Meshtastic_Interface.py](Interface%2FMeshtastic_Interface.py) to your interfaces folder for reticulum
-- Modify the node config file and add the following
-```
- [[Meshtastic Interface]]
-  type = Meshtastic_Interface
-  enabled = true
-  mode = gateway
-  port = /dev/[path to device]  # Optional: Meshtastic serial device port
-  ble_port = short_1234  # Optional: Meshtastic BLE device ID (Replacement for serial port)
-  tcp_port = 127.0.0.1:4403  #Optional: Meshtastic TCP IP. [port is optional if using default port] (Replacement for serial or ble)
-  data_speed = 8  # Radio speed setting desired for the network(do not use long-fast)
-```
+Features
 
-- Radio settings and their associated transfer speeds are shown below; time unit is seconds between packets (from [Meshtastic_Interface.py](Interface%2FMeshtastic_Interface.py))
-```python
-speed_to_delay = {8: .4,  # Short-range Turbo (recommended)
-                  6: 1,  # Short Fast (best if short turbo is unavailable)
-                  5: 3,  # Short-range Slow (best if short turbo is unavailable)
-                  7: 12,  # Long Range - moderate Fast
-                  4: 4,  # Medium Range - Fast  (Slowest recommended speed)
-                  3:6,  # Medium Range - Slow
-                  1: 15,  # Long Range - Slow
-                  0: 8  # Long Range - Fast
-                  }
-```
-- Use the number on the left to set the speed and change the number on the right to change the max transmission rate from the radio
+Binds IMeshService (Meshtastic app) — no direct BLE/USB in your app
+
+Localhost TCP bridge (127.0.0.1:45832, u16 length-prefixed frames)
+
+Broadcast or Unicast to gateway (destinationId), toggle at runtime
+
+MTU default 180 bytes (LoRa-friendly fragmentation for RNS)
+
+PRIVATE_APP by default; optional Stream (e.g., "RNS")
+
+Auto-reconnect with backoff; ForegroundService + persistent notification
+
+127.0.0.1 only (safe by default); optional token/HMAC handshake supported
+
+Why
+
+Keep it simple: Let the Meshtastic app own BLE/USB; you only speak AIDL.
+
+Sideband/Reticulum friendly: 60–100 LOC Python External Interface can plug straight in.
+
+Air-efficient: Use RNS reliability, keep Meshtastic link-layer ACKs off, MTU ≈ 180.
+
+Architecture
+[Sideband / Reticulum]  <--TCP-->  [IMeshService Bridge (this app)]  <--AIDL-->  [Meshtastic app]  <--RF-->  Mesh
+         ^                                                                               ^
+         |  External Interface (60–100 LOC)                                              |  Your radio
+         |  len-prefixed frames (u16 | bytes)                                            |
+
+Requirements
+
+Android 8+ (API 26+)
+
+Meshtastic Android app installed and connected to your device
+
+This app’s only special permission: Foreground Service (for long-running bind)
+
+Install
+
+Releases: download and sideload the APK, or
+
+Build: Android Studio → Build > Generate Signed APK… → install the release APK.
+
+Usage
+
+Open the Meshtastic app and confirm it’s connected to your radio.
+
+Start IMeshService Bridge → the notification will show “Bridge active”.
+
+Point Reticulum at the local socket.
